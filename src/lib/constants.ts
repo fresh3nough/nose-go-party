@@ -26,5 +26,6 @@ export const FOREHEAD_INDEX = 10
 export const WRIST_INDEX = 0
 export const THUMB_TIP_INDEX = 4
 export const INDEX_TIP_INDEX = 8
+export const MIDDLE_TIP_INDEX = 12
 
 export const PARTY_HAT_SRC = '/party-hat.png'

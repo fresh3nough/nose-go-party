@@ -18,6 +18,7 @@ import {
   FOREHEAD_INDEX,
   HAND_MODEL_URL,
   INDEX_TIP_INDEX,
+  MIDDLE_TIP_INDEX,
   NOSE_TIP_INDEX,
   THUMB_TIP_INDEX,
   WASM_BASE_URL,
@@ -43,6 +44,7 @@ declare const self: DedicatedWorkerGlobalScope & {
 let faceLandmarker: FaceLandmarker | null = null
 let handLandmarker: HandLandmarker | null = null
 let busy = false
+let previousPersons: import('../lib/types').PersonDetection[] = []
 let wasmImportGeneration = 0
 
 function post(msg: WorkerOutMessage) {
@@ -244,12 +246,14 @@ function detect(bitmap: ImageBitmap, timestamp: number, mirror: boolean) {
       hands.push({
         indexTip: lmToPoint(lms[INDEX_TIP_INDEX], mirror),
         thumbTip: lmToPoint(lms[THUMB_TIP_INDEX], mirror),
+        middleTip: lmToPoint(lms[MIDDLE_TIP_INDEX] ?? lms[INDEX_TIP_INDEX], mirror),
         wrist: lmToPoint(lms[WRIST_INDEX], mirror),
       })
     }
 
     const associated = associateHandsToFaces(faces, hands)
-    const persons = assignPlayers(associated)
+    const persons = assignPlayers(associated, undefined, previousPersons)
+    previousPersons = persons
 
     post({
       type: 'RESULT',
@@ -274,6 +278,7 @@ function dispose() {
   handLandmarker?.close()
   faceLandmarker = null
   handLandmarker = null
+  previousPersons = []
 }
 
 self.onmessage = (ev: MessageEvent<WorkerInMessage>) => {

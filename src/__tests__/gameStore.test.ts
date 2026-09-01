@@ -7,6 +7,7 @@ const samplePerson = (n = 1): PersonDetection => ({
   id: n - 1,
   playerNumber: n,
   faceBox: { xMin: 0.3, yMin: 0.2, width: 0.2, height: 0.3 },
+  trackBox: { xMin: 0.28, yMin: 0.18, width: 0.24, height: 0.34 },
   noseTip: { x: 0.4, y: 0.35 },
   forehead: { x: 0.4, y: 0.22 },
   hands: [],

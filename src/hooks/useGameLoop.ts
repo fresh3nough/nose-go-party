@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from 'react'
 import {
   createStreakCounter,
   isValidNoseTouch,
+  minNoseDistance,
   primaryHandPoint,
 } from '../lib/collision'
 import type { PersonDetection, Point2D, VisionFrameResult } from '../lib/types'
@@ -10,13 +11,15 @@ import { useVisionWorker } from './useVisionWorker'
 
 /**
  * Orchestrates detection results into the game state machine:
- * - Always updates person list (for ghost boxes / START enable)
- * - During ACTIVE: runs collision + anti-cheat + 2-frame streak
+ * - Always updates person list (for tracking boxes / START enable)
+ * - During ACTIVE: collision + anti-cheat + 2-frame streak
  * - Captures hand start positions when transitioning into ACTIVE
+ * - Multi-person: evaluates every person each frame; first confirmed streak wins
  */
 export function useGameLoop(videoRef: React.RefObject<HTMLVideoElement | null>) {
   const rafRef = useRef<number>(0)
   const activeStartRef = useRef<number>(0)
+  // 2 consecutive frames is enough; threshold is already forgiving
   const streak = useRef(createStreakCounter(2))
   const lastPersonsRef = useRef<PersonDetection[]>([])
 
@@ -46,36 +49,39 @@ export function useGameLoop(videoRef: React.RefObject<HTMLVideoElement | null>) 
       }
 
       const starts = handStartsRef.current
-      let candidate: PersonDetection | null = null
-      for (const person of result.persons) {
-        // Build per-person start map from global keyed starts
-        const personStarts: Record<string, Point2D> = {}
-        for (const [key, pt] of Object.entries(starts)) {
-          const [pid, handIdx] = key.split(':')
-          if (Number(pid) === person.id) {
-            personStarts[handIdx] = pt
-          }
-        }
-        // Also allow a generic 'any' fallback using first hand start for person
-        const anyKey = Object.keys(starts).find((k) => k.startsWith(`${person.id}:`))
-        if (anyKey) personStarts['any'] = starts[anyKey]
 
-        if (isValidNoseTouch(person, personStarts)) {
+      // Evaluate ALL players simultaneously; nearest valid touch wins the frame
+      let candidate: PersonDetection | null = null
+      let bestDist = Number.POSITIVE_INFINITY
+
+      for (const person of result.persons) {
+        const personStarts = startsForPerson(starts, person.id)
+
+        if (!isValidNoseTouch(person, personStarts)) continue
+
+        const d = minNoseDistance(person)
+        if (d < bestDist) {
+          bestDist = d
           candidate = person
-          break
         }
       }
 
       const confirmedId = streak.current.update(candidate ? candidate.id : null)
-      if (confirmedId !== null && candidate) {
+      if (confirmedId !== null) {
+        // Re-find by stable id in case ranking shifted
+        const winnerPerson =
+          result.persons.find((p) => p.id === confirmedId) ??
+          (candidate && candidate.id === confirmedId ? candidate : null)
+        if (!winnerPerson) return
+
         const elapsedMs = performance.now() - activeStartRef.current
         declareWinner({
-          playerNumber: candidate.playerNumber,
-          personId: candidate.id,
+          playerNumber: winnerPerson.playerNumber,
+          personId: winnerPerson.id,
           timeSeconds: elapsedMs / 1000,
-          noseTip: candidate.noseTip,
-          forehead: candidate.forehead,
-          faceBox: candidate.faceBox,
+          noseTip: winnerPerson.noseTip,
+          forehead: winnerPerson.forehead,
+          faceBox: winnerPerson.faceBox,
         })
       }
     },
@@ -84,8 +90,6 @@ export function useGameLoop(videoRef: React.RefObject<HTMLVideoElement | null>) 
 
   const { detect } = useVisionWorker(onResult)
 
-  // Capture hand starts + begin ACTIVE when countdown finishes (GO!)
-  // The Countdown component calls into the store; we observe phase change.
   useEffect(() => {
     if (phase === 'ACTIVE') {
       activeStartRef.current = performance.now()
@@ -96,14 +100,25 @@ export function useGameLoop(videoRef: React.RefObject<HTMLVideoElement | null>) 
   /**
    * Called by Countdown when GO! animation completes.
    * Snapshots current hand positions for anti-cheat.
+   * Also snapshots a synthetic "away" start if no hands are visible so that
+   * a later nose touch still has a travel baseline from frame edge.
    */
   const onGoComplete = useCallback(() => {
     const persons = lastPersonsRef.current
     const starts: Record<string, Point2D> = {}
     for (const p of persons) {
-      p.hands.forEach((hand, i) => {
-        starts[`${p.id}:${i}`] = { ...primaryHandPoint(hand) }
-      })
+      if (p.hands.length === 0) {
+        // No hands at GO! — seed a far start so first touch after raise counts
+        starts[`${p.id}:any`] = {
+          x: p.noseTip.x,
+          y: Math.min(0.95, p.noseTip.y + 0.35),
+        }
+      } else {
+        p.hands.forEach((hand, i) => {
+          starts[`${p.id}:${i}`] = { ...primaryHandPoint(hand) }
+        })
+        starts[`${p.id}:any`] = { ...primaryHandPoint(p.hands[0]) }
+      }
     }
     beginActive(starts)
     activeStartRef.current = performance.now()
@@ -136,3 +151,20 @@ export function useGameLoop(videoRef: React.RefObject<HTMLVideoElement | null>) 
 
   return { onGoComplete }
 }
+
+/** Collect GO! start points belonging to one stable person id. */
+function startsForPerson(
+  starts: Record<string, Point2D>,
+  personId: number,
+): Record<string, Point2D> {
+  const personStarts: Record<string, Point2D> = {}
+  const prefix = `${personId}:`
+  for (const [key, pt] of Object.entries(starts)) {
+    if (!key.startsWith(prefix)) continue
+    const handIdx = key.slice(prefix.length)
+    personStarts[handIdx] = pt
+  }
+  return personStarts
+}
+
+// silence unused in case tree-shaken debug wants threshold later

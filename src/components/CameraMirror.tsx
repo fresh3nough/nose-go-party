@@ -1,25 +1,28 @@
 import { useEffect, useRef } from 'react'
 import { PARTY_HAT_SRC } from '../lib/constants'
+import { minNoseDistance } from '../lib/collision'
 import type { PersonDetection, WinnerInfo } from '../lib/types'
+import { NOSE_TOUCH_THRESHOLD, PLAYER_COLORS } from '../lib/types'
 import { useGameStore } from '../store/gameStore'
 
 interface CameraMirrorProps {
   videoRef: React.RefObject<HTMLVideoElement | null>
 }
 
-const GHOST_COLORS = ['#FF006E', '#3A86FF', '#FFBE0B', '#06D6A0', '#8338EC', '#FB5607']
-
 /**
- * Full-screen mirrored camera with canvas overlay for ghost boxes,
- * landmarks, party hat, and loser greying.
+ * Full-screen mirrored camera with canvas overlay:
+ * - One solid tracking square per detected player
+ * - Nose + fingertip markers
+ * - Near-touch glow when a finger approaches the nose
+ * - Party hat + loser dim on win
  */
 export function CameraMirror({ videoRef }: CameraMirrorProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const hatImgRef = useRef<HTMLImageElement | null>(null)
-
-  const persons = useGameStore((s) => s.persons)
-  const phase = useGameStore((s) => s.phase)
-  const winner = useGameStore((s) => s.winner)
+  const personsRef = useRef(useGameStore.getState().persons)
+  const phaseRef = useRef(useGameStore.getState().phase)
+  const winnerRef = useRef(useGameStore.getState().winner)
+  const rafRef = useRef(0)
 
   // Preload party hat
   useEffect(() => {
@@ -28,7 +31,16 @@ export function CameraMirror({ videoRef }: CameraMirrorProps) {
     hatImgRef.current = img
   }, [])
 
-  // Keep canvas sized to the viewport / video
+  // Subscribe to store for latest overlay data without React re-render lag
+  useEffect(() => {
+    return useGameStore.subscribe((s) => {
+      personsRef.current = s.persons
+      phaseRef.current = s.phase
+      winnerRef.current = s.winner
+    })
+  }, [])
+
+  // Keep canvas sized to the video box
   useEffect(() => {
     const canvas = canvasRef.current
     const video = videoRef.current
@@ -52,40 +64,55 @@ export function CameraMirror({ videoRef }: CameraMirrorProps) {
     }
   }, [videoRef])
 
-  // Draw overlay each time persons / phase / winner change
+  // Continuous RAF overlay for snappy tracking (not only on React state ticks)
   useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas) return
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
+    let alive = true
+    const draw = () => {
+      if (!alive) return
+      const canvas = canvasRef.current
+      if (canvas) {
+        const ctx = canvas.getContext('2d')
+        if (ctx) {
+          const w = canvas.width
+          const h = canvas.height
+          ctx.clearRect(0, 0, w, h)
 
-    const w = canvas.width
-    const h = canvas.height
-    ctx.clearRect(0, 0, w, h)
+          const phase = phaseRef.current
+          const persons = personsRef.current
+          const winner = winnerRef.current
 
-    if (phase === 'WIN' && winner) {
-      drawWinOverlay(ctx, w, h, persons, winner, hatImgRef.current)
-      return
+          if (phase === 'WIN' && winner) {
+            drawWinOverlay(ctx, w, h, persons, winner, hatImgRef.current)
+          } else {
+            for (const person of persons) {
+              drawPlayerTracker(ctx, w, h, person, phase === 'ACTIVE')
+            }
+          }
+        }
+      }
+      rafRef.current = requestAnimationFrame(draw)
     }
-
-    // Ghost bounding boxes + nose dots in IDLE/READY/COUNTDOWN/ACTIVE/TIMEOUT
-    for (const person of persons) {
-      drawGhostBox(ctx, w, h, person)
+    rafRef.current = requestAnimationFrame(draw)
+    return () => {
+      alive = false
+      cancelAnimationFrame(rafRef.current)
     }
-  }, [persons, phase, winner, videoRef])
+  }, [])
 
   return (
     <div className="camera-stage">
-      <video
-        ref={videoRef}
-        className="camera-video"
-        playsInline
-        muted
-        autoPlay
-        // Mirrored selfie view
-        style={{ transform: 'scaleX(-1)' }}
-      />
-      <canvas ref={canvasRef} className="camera-overlay" />
+      <div className="camera-frame">
+        <video
+          ref={videoRef}
+          className="camera-video"
+          playsInline
+          muted
+          autoPlay
+          // Mirrored selfie view
+          style={{ transform: 'scaleX(-1)' }}
+        />
+        <canvas ref={canvasRef} className="camera-overlay" />
+      </div>
     </div>
   )
 }
@@ -94,45 +121,107 @@ function toPx(norm: number, size: number) {
   return norm * size
 }
 
-function drawGhostBox(
+function playerColor(playerNumber: number) {
+  return PLAYER_COLORS[(playerNumber - 1) % PLAYER_COLORS.length]
+}
+
+/**
+ * Bold per-player tracking square + landmarks.
+ * Separate box for every detected person (multiplayer simultaneous).
+ */
+function drawPlayerTracker(
   ctx: CanvasRenderingContext2D,
   w: number,
   h: number,
   person: PersonDetection,
+  active: boolean,
 ) {
-  const color = GHOST_COLORS[(person.playerNumber - 1) % GHOST_COLORS.length]
-  const { faceBox, noseTip, hands, playerNumber } = person
-  const x = toPx(faceBox.xMin, w)
-  const y = toPx(faceBox.yMin, h)
-  const bw = toPx(faceBox.width, w)
-  const bh = toPx(faceBox.height, h)
+  const color = playerColor(person.playerNumber)
+  const box = person.trackBox ?? person.faceBox
+  const x = toPx(box.xMin, w)
+  const y = toPx(box.yMin, h)
+  const bw = toPx(box.width, w)
+  const bh = toPx(box.height, h)
+
+  const near = minNoseDistance(person)
+  const touching = near < NOSE_TOUCH_THRESHOLD
+  const approaching = near < NOSE_TOUCH_THRESHOLD * 1.8
 
   ctx.save()
-  ctx.strokeStyle = color
-  ctx.lineWidth = 3
-  ctx.globalAlpha = 0.85
-  ctx.setLineDash([8, 6])
-  roundRect(ctx, x, y, bw, bh, 12)
-  ctx.stroke()
-  ctx.setLineDash([])
 
-  // Player label
+  // Outer glow
+  ctx.shadowColor = color
+  ctx.shadowBlur = touching ? 28 : approaching ? 18 : 10
+
+  // Fat solid box (not dashed)
   ctx.globalAlpha = 1
-  ctx.fillStyle = color
-  ctx.font = 'bold 16px system-ui, sans-serif'
-  ctx.fillText(`P${playerNumber}`, x + 8, Math.max(18, y - 8))
+  ctx.lineWidth = touching ? 8 : 6
+  ctx.strokeStyle = color
+  roundRect(ctx, x, y, bw, bh, 16)
+  ctx.stroke()
 
-  // Nose tip
+  // Inner highlight stroke
+  ctx.shadowBlur = 0
+  ctx.lineWidth = 2
+  ctx.strokeStyle = 'rgba(255,255,255,0.85)'
+  roundRect(ctx, x + 4, y + 4, Math.max(0, bw - 8), Math.max(0, bh - 8), 12)
+  ctx.stroke()
+
+  // Corner brackets for arcade feel
+  drawCorners(ctx, x, y, bw, bh, color, 22, 5)
+
+  // Player badge
+  const label = `P${person.playerNumber}`
+  ctx.font = 'bold 18px system-ui, sans-serif'
+  const tw = ctx.measureText(label).width
+  const badgeW = tw + 18
+  const badgeH = 28
+  const bx = x
+  const by = Math.max(6, y - badgeH - 6)
+  ctx.fillStyle = color
+  roundRect(ctx, bx, by, badgeW, badgeH, 8)
+  ctx.fill()
+  ctx.fillStyle = '#fff'
+  ctx.fillText(label, bx + 9, by + 19)
+
+  // Nose tip (large)
+  const nx = toPx(person.noseTip.x, w)
+  const ny = toPx(person.noseTip.y, h)
   ctx.beginPath()
-  ctx.arc(toPx(noseTip.x, w), toPx(noseTip.y, h), 6, 0, Math.PI * 2)
+  ctx.arc(nx, ny, touching ? 10 : 7, 0, Math.PI * 2)
   ctx.fillStyle = color
   ctx.fill()
+  ctx.lineWidth = 2
+  ctx.strokeStyle = '#fff'
+  ctx.stroke()
 
-  // Hand tips
-  for (const hand of hands) {
-    drawDot(ctx, toPx(hand.indexTip.x, w), toPx(hand.indexTip.y, h), '#fff', 5)
-    drawDot(ctx, toPx(hand.thumbTip.x, w), toPx(hand.thumbTip.y, h), '#ddd', 4)
+  // Touch radius ring while active
+  if (active) {
+    ctx.beginPath()
+    ctx.arc(nx, ny, NOSE_TOUCH_THRESHOLD * Math.min(w, h), 0, Math.PI * 2)
+    ctx.strokeStyle = touching ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.25)'
+    ctx.lineWidth = touching ? 3 : 1.5
+    ctx.setLineDash(touching ? [] : [4, 6])
+    ctx.stroke()
+    ctx.setLineDash([])
   }
+
+  // Hands
+  for (const hand of person.hands) {
+    drawDot(ctx, toPx(hand.indexTip.x, w), toPx(hand.indexTip.y, h), '#fff', 7)
+    drawDot(ctx, toPx(hand.thumbTip.x, w), toPx(hand.thumbTip.y, h), '#ffe08a', 6)
+    if (hand.middleTip) {
+      drawDot(ctx, toPx(hand.middleTip.x, w), toPx(hand.middleTip.y, h), '#cdefff', 5)
+    }
+    // palm line wrist -> index
+    ctx.beginPath()
+    ctx.moveTo(toPx(hand.wrist.x, w), toPx(hand.wrist.y, h))
+    ctx.lineTo(toPx(hand.indexTip.x, w), toPx(hand.indexTip.y, h))
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)'
+    ctx.lineWidth = 2
+    ctx.stroke()
+  }
+
   ctx.restore()
 }
 
@@ -144,14 +233,13 @@ function drawWinOverlay(
   winner: WinnerInfo,
   hat: HTMLImageElement | null,
 ) {
-  // Grey/blur losers via dimmed boxes; winner stays vivid
   for (const person of persons) {
     const isWinner = person.playerNumber === winner.playerNumber
-    const { faceBox } = person
-    const x = toPx(faceBox.xMin, w)
-    const y = toPx(faceBox.yMin, h)
-    const bw = toPx(faceBox.width, w)
-    const bh = toPx(faceBox.height, h)
+    const box = person.trackBox ?? person.faceBox
+    const x = toPx(box.xMin, w)
+    const y = toPx(box.yMin, h)
+    const bw = toPx(box.width, w)
+    const bh = toPx(box.height, h)
 
     if (!isWinner) {
       ctx.save()
@@ -159,22 +247,20 @@ function drawWinOverlay(
       roundRect(ctx, x - 8, y - 8, bw + 16, bh + 16, 14)
       ctx.fill()
       ctx.strokeStyle = 'rgba(160,160,170,0.5)'
-      ctx.lineWidth = 2
-      ctx.filter = 'grayscale(1)'
+      ctx.lineWidth = 3
       ctx.stroke()
       ctx.restore()
     } else {
-      const color = GHOST_COLORS[(person.playerNumber - 1) % GHOST_COLORS.length]
+      const color = playerColor(person.playerNumber)
       ctx.save()
       ctx.strokeStyle = color
-      ctx.lineWidth = 4
+      ctx.lineWidth = 8
       ctx.shadowColor = color
-      ctx.shadowBlur = 18
-      roundRect(ctx, x, y, bw, bh, 12)
+      ctx.shadowBlur = 24
+      roundRect(ctx, x, y, bw, bh, 16)
       ctx.stroke()
       ctx.restore()
 
-      // Party hat anchored to forehead
       if (hat && hat.complete && hat.naturalWidth > 0) {
         const hatW = bw * 0.9
         const hatH = hatW * (hat.naturalHeight / hat.naturalWidth)
@@ -184,6 +270,46 @@ function drawWinOverlay(
       }
     }
   }
+}
+
+function drawCorners(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  color: string,
+  len: number,
+  thickness: number,
+) {
+  ctx.strokeStyle = color
+  ctx.lineWidth = thickness
+  ctx.lineCap = 'square'
+  const L = Math.min(len, w / 3, h / 3)
+  // TL
+  ctx.beginPath()
+  ctx.moveTo(x, y + L)
+  ctx.lineTo(x, y)
+  ctx.lineTo(x + L, y)
+  ctx.stroke()
+  // TR
+  ctx.beginPath()
+  ctx.moveTo(x + w - L, y)
+  ctx.lineTo(x + w, y)
+  ctx.lineTo(x + w, y + L)
+  ctx.stroke()
+  // BL
+  ctx.beginPath()
+  ctx.moveTo(x, y + h - L)
+  ctx.lineTo(x, y + h)
+  ctx.lineTo(x + L, y + h)
+  ctx.stroke()
+  // BR
+  ctx.beginPath()
+  ctx.moveTo(x + w - L, y + h)
+  ctx.lineTo(x + w, y + h)
+  ctx.lineTo(x + w, y + h - L)
+  ctx.stroke()
 }
 
 function drawDot(
@@ -197,6 +323,9 @@ function drawDot(
   ctx.arc(x, y, r, 0, Math.PI * 2)
   ctx.fillStyle = color
   ctx.fill()
+  ctx.lineWidth = 1.5
+  ctx.strokeStyle = 'rgba(0,0,0,0.35)'
+  ctx.stroke()
 }
 
 function roundRect(

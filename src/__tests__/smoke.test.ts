@@ -27,8 +27,8 @@ describe('smoke: critical modules load', () => {
 
   it('has expected game constants', () => {
     expect(MAX_PLAYERS).toBe(6)
-    expect(NOSE_TOUCH_THRESHOLD).toBe(0.04)
-    expect(ANTI_CHEAT_TRAVEL).toBe(0.15)
+    expect(NOSE_TOUCH_THRESHOLD).toBe(0.07)
+    expect(ANTI_CHEAT_TRAVEL).toBe(0.10)
     expect(GAME_TIMEOUT_MS).toBe(15_000)
     expect(COUNTDOWN_COLORS[0]).toBe('#FF006E')
     expect(COUNTDOWN_COLORS[1]).toBe('#3A86FF')

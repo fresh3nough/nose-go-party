@@ -8,8 +8,13 @@ export function distance(a: Point2D, b: Point2D): number {
   return Math.hypot(dx, dy)
 }
 
+/** All fingertip candidates used for nose-touch checks. */
+export function handTouchPoints(hand: HandLandmarks): Point2D[] {
+  return [hand.indexTip, hand.thumbTip, hand.middleTip].filter(Boolean)
+}
+
 /**
- * Returns true when either index tip or thumb tip is within the nose-touch
+ * Returns true when index, thumb, or middle tip is within the nose-touch
  * threshold of the nose tip.
  */
 export function isHandTouchingNose(
@@ -17,10 +22,7 @@ export function isHandTouchingNose(
   hand: HandLandmarks,
   threshold: number = NOSE_TOUCH_THRESHOLD,
 ): boolean {
-  return (
-    distance(noseTip, hand.indexTip) < threshold ||
-    distance(noseTip, hand.thumbTip) < threshold
-  )
+  return handTouchPoints(hand).some((p) => distance(noseTip, p) < threshold)
 }
 
 /**
@@ -35,31 +37,47 @@ export function personNoseTouch(
 }
 
 /**
- * Anti-cheat: hand must have traveled at least `minTravel` (fraction of frame
- * diagonal-ish; we use pure normalized euclidean) from its position at GO!
+ * Anti-cheat: hand must have traveled at least `minTravel` from GO! snapshot.
+ * If no start was recorded (hand not visible at GO!), treat as valid travel —
+ * the hand entered the scene after the race started.
  */
 export function hasTraveledEnough(
   start: Point2D | null | undefined,
   current: Point2D,
   minTravel: number = ANTI_CHEAT_TRAVEL,
 ): boolean {
-  if (!start) return false
+  if (!start) return true
   return distance(start, current) >= minTravel
 }
 
 /**
  * Pick the representative hand point used for anti-cheat travel tracking.
- * Prefer index tip; fall back to thumb tip; then wrist.
+ * Prefer index tip; fall back to middle, thumb, then wrist.
  */
 export function primaryHandPoint(hand: HandLandmarks): Point2D {
-  return hand.indexTip ?? hand.thumbTip ?? hand.wrist
+  return hand.indexTip ?? hand.middleTip ?? hand.thumbTip ?? hand.wrist
+}
+
+/**
+ * Closest fingertip distance to nose (for debug overlay / near-touch glow).
+ */
+export function minNoseDistance(person: PersonDetection): number {
+  let best = Number.POSITIVE_INFINITY
+  for (const hand of person.hands) {
+    for (const p of handTouchPoints(hand)) {
+      const d = distance(person.noseTip, p)
+      if (d < best) best = d
+    }
+  }
+  return best
 }
 
 /**
  * For a person, return true if at least one hand both touches the nose AND
  * has traveled far enough from the recorded start position.
  *
- * `startPositions` maps a hand key ("0","1",...) to the point captured at GO!
+ * `startPositions` maps hand keys ("0","1",... or "any") to GO! points.
+ * Missing starts count as traveled (hand appeared after GO!).
  */
 export function isValidNoseTouch(
   person: PersonDetection,
@@ -67,11 +85,29 @@ export function isValidNoseTouch(
   threshold: number = NOSE_TOUCH_THRESHOLD,
   minTravel: number = ANTI_CHEAT_TRAVEL,
 ): boolean {
+  // If this person had no hands tracked at GO!, any post-GO touch is valid
+  // once a hand reaches the nose (anti-cheat start map empty for them).
+  const hasAnyStart =
+    Object.keys(startPositions).length > 0 ||
+    startPositions['any'] !== undefined
+
   for (let i = 0; i < person.hands.length; i++) {
     const hand = person.hands[i]
     if (!isHandTouchingNose(person.noseTip, hand, threshold)) continue
-    const start = startPositions[String(i)] ?? startPositions['any']
+
+    const start =
+      startPositions[String(i)] ??
+      startPositions['any'] ??
+      // Fall back: any recorded start for this person (hand index may shuffle)
+      Object.values(startPositions)[0]
+
     const point = primaryHandPoint(hand)
+
+    // No start at all for this person → hand entered after GO → allow
+    if (!hasAnyStart && start === undefined) {
+      return true
+    }
+
     if (hasTraveledEnough(start, point, minTravel)) {
       return true
     }
