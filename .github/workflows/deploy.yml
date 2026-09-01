@@ -1,0 +1,107 @@
+# NOSE GO! Party Edition — build and deploy on push to main
+#
+# Required GitHub repository secrets:
+#   STATIC_IP    — VM external IP (from scripts/gcp-setup.sh / nose-go-ip)
+#   GCP_SSH_KEY  — private SSH key for DEPLOY_USER (full PEM, including headers)
+#   DEPLOY_USER  — Linux user on the VM (e.g. ubuntu)
+#
+# Optional:
+#   Ensure the matching public key is in ~DEPLOY_USER/.ssh/authorized_keys
+#   and that install-server.sh has been run once on the VM.
+
+name: Deploy
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-main
+  cancel-in-progress: true
+
+jobs:
+  build-and-deploy:
+    name: Test, build, deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify dist
+        run: |
+          test -d dist
+          test -f dist/index.html
+          echo "dist contents:"
+          find dist -maxdepth 2 -type f | head -n 100
+
+      - name: Prepare SSH key
+        env:
+          GCP_SSH_KEY: ${{ secrets.GCP_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          echo "$GCP_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf 'Host *\n  StrictHostKeyChecking accept-new\n  IdentitiesOnly yes\n' > ~/.ssh/config
+
+      - name: Deploy to GCP VM
+        env:
+          DEPLOY_HOST: ${{ secrets.STATIC_IP }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          SSH_KEY: ${{ runner.temp }}/unused
+        run: |
+          set -euo pipefail
+          : "${{ secrets.STATIC_IP }}"
+          : "${{ secrets.DEPLOY_USER }}"
+
+          HOST="${{ secrets.STATIC_IP }}"
+          USER="${{ secrets.DEPLOY_USER }}"
+          KEY="$HOME/.ssh/deploy_key"
+          REMOTE_DIST="/var/www/nosego/dist"
+
+          echo "[ci] ensuring remote docroot"
+          ssh -i "$KEY" -o IdentitiesOnly=yes "${USER}@${HOST}" \
+            "sudo mkdir -p '${REMOTE_DIST}' && sudo chown -R '${USER}:${USER}' /var/www/nosego"
+
+          if command -v rsync >/dev/null 2>&1; then
+            echo "[ci] rsync dist/"
+            rsync -avz --delete -e "ssh -i $KEY -o IdentitiesOnly=yes" \
+              dist/ "${USER}@${HOST}:${REMOTE_DIST}/"
+          else
+            echo "[ci] scp dist/"
+            scp -i "$KEY" -o IdentitiesOnly=yes -r dist/. "${USER}@${HOST}:${REMOTE_DIST}/"
+          fi
+
+          echo "[ci] reload nginx"
+          ssh -i "$KEY" -o IdentitiesOnly=yes "${USER}@${HOST}" bash -s <<'REMOTE'
+          set -euo pipefail
+          sudo chown -R www-data:www-data /var/www/nosego/dist
+          sudo nginx -t
+          sudo systemctl reload nginx
+          echo "[remote] deploy ok"
+          REMOTE
+
+      - name: Summary
+        run: |
+          echo "Deployed to http://${{ secrets.STATIC_IP }}/"
+          echo "Secrets used: STATIC_IP, GCP_SSH_KEY, DEPLOY_USER"
+          echo "Configure DNS + certbot on the VM for HTTPS (camera on non-localhost)."
