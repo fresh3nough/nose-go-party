@@ -1,11 +1,12 @@
 /// <reference lib="webworker" />
 /**
- * MediaPipe FaceLandmarker + HandLandmarker running off the main thread.
- * Tries GPU delegate first, falls back to CPU.
+ * MediaPipe FaceLandmarker + HandLandmarker off the main thread.
  *
- * WASM assets are served same-origin from /wasm and patched so ModuleFactory
- * is assigned on the worker global (required when the loader is pulled in via
- * dynamic import inside a module worker).
+ * WASM is same-origin (/wasm), patched so ModuleFactory + custom_dbg exist on
+ * the worker global (required for dynamic import inside a module worker).
+ *
+ * MediaPipe nulls `self.ModuleFactory` after every successful WASM boot, so we
+ * re-seed it before each FaceLandmarker / HandLandmarker createFromOptions call.
  */
 import {
   FaceLandmarker,
@@ -31,11 +32,18 @@ import type {
   WorkerOutMessage,
 } from '../lib/types'
 
-declare const self: DedicatedWorkerGlobalScope
+type VisionFileset = Awaited<ReturnType<typeof FilesetResolver.forVisionTasks>>
+
+declare const self: DedicatedWorkerGlobalScope & {
+  ModuleFactory?: unknown
+  custom_dbg?: (...args: unknown[]) => void
+  dbg?: (...args: unknown[]) => void
+}
 
 let faceLandmarker: FaceLandmarker | null = null
 let handLandmarker: HandLandmarker | null = null
 let busy = false
+let wasmImportGeneration = 0
 
 function post(msg: WorkerOutMessage) {
   self.postMessage(msg)
@@ -48,10 +56,7 @@ function lmToPoint(lm: { x: number; y: number }, mirror: boolean): Point2D {
   }
 }
 
-/**
- * Resolve WASM base URL to an absolute path the worker can fetch.
- * Relative "/wasm" breaks under some worker base-URI cases.
- */
+/** Absolute WASM directory URL for FilesetResolver. */
 function resolveWasmBase(): string {
   if (/^https?:\/\//i.test(WASM_BASE_URL)) {
     return WASM_BASE_URL.replace(/\/$/, '')
@@ -61,10 +66,43 @@ function resolveWasmBase(): string {
   return `${origin}${path}`.replace(/\/$/, '')
 }
 
-async function createLandmarkers(delegate: 'GPU' | 'CPU') {
-  const wasmBase = resolveWasmBase()
-  const vision = await FilesetResolver.forVisionTasks(wasmBase)
-  const face = await FaceLandmarker.createFromOptions(vision, {
+/** Always-available debug hooks used by the Emscripten glue in strict mode. */
+function installDebugGlobals() {
+  if (typeof self.custom_dbg !== 'function') {
+    self.custom_dbg = (...args: unknown[]) => {
+      try {
+        console.warn(...args)
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  if (typeof self.dbg !== 'function') {
+    self.dbg = self.custom_dbg
+  }
+}
+
+/**
+ * Ensure ModuleFactory is present. MediaPipe clears it after each factory use,
+ * so this must run before every createFromOptions.
+ */
+async function ensureModuleFactory(wasmBase: string): Promise<void> {
+  installDebugGlobals()
+  if (typeof self.ModuleFactory === 'function') {
+    return
+  }
+
+  wasmImportGeneration += 1
+  // Query bust forces a fresh module evaluation so UMD side effects re-run.
+  const url = `${wasmBase}/vision_wasm_internal.js?v=${wasmImportGeneration}`
+  await import(/* @vite-ignore */ url)
+  if (typeof self.ModuleFactory !== 'function') {
+    throw new Error(`ModuleFactory missing after importing ${url}`)
+  }
+}
+
+async function createFace(vision: VisionFileset, delegate: 'GPU' | 'CPU') {
+  return FaceLandmarker.createFromOptions(vision, {
     baseOptions: {
       modelAssetPath: FACE_MODEL_URL,
       delegate,
@@ -74,7 +112,10 @@ async function createLandmarkers(delegate: 'GPU' | 'CPU') {
     outputFaceBlendshapes: false,
     outputFacialTransformationMatrixes: false,
   })
-  const hand = await HandLandmarker.createFromOptions(vision, {
+}
+
+async function createHand(vision: VisionFileset, delegate: 'GPU' | 'CPU') {
+  return HandLandmarker.createFromOptions(vision, {
     baseOptions: {
       modelAssetPath: HAND_MODEL_URL,
       delegate,
@@ -85,21 +126,50 @@ async function createLandmarkers(delegate: 'GPU' | 'CPU') {
     minHandPresenceConfidence: 0.5,
     minTrackingConfidence: 0.5,
   })
+}
+
+/** Create face+hand for a delegate, re-seeding ModuleFactory before each call. */
+async function createPair(wasmBase: string, delegate: 'GPU' | 'CPU') {
+  await ensureModuleFactory(wasmBase)
+  const vision = await FilesetResolver.forVisionTasks(wasmBase)
+
+  await ensureModuleFactory(wasmBase)
+  const face = await createFace(vision, delegate)
+
+  await ensureModuleFactory(wasmBase)
+  const hand = await createHand(vision, delegate)
+
   return { face, hand }
 }
 
 async function init() {
   try {
+    const wasmBase = resolveWasmBase()
+    installDebugGlobals()
+
     try {
-      const gpu = await createLandmarkers('GPU')
+      const gpu = await createPair(wasmBase, 'GPU')
       faceLandmarker = gpu.face
       handLandmarker = gpu.hand
       post({ type: 'READY', delegate: 'GPU' })
       return
     } catch (gpuErr) {
       console.warn('[vision.worker] GPU delegate failed, trying CPU', gpuErr)
+      try {
+        faceLandmarker?.close()
+      } catch {
+        /* ignore */
+      }
+      try {
+        handLandmarker?.close()
+      } catch {
+        /* ignore */
+      }
+      faceLandmarker = null
+      handLandmarker = null
     }
-    const cpu = await createLandmarkers('CPU')
+
+    const cpu = await createPair(wasmBase, 'CPU')
     faceLandmarker = cpu.face
     handLandmarker = cpu.hand
     post({ type: 'READY', delegate: 'CPU' })
