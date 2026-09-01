@@ -5,13 +5,15 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "node scripts/sync-wasm.mjs",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "postinstall": "node scripts/sync-wasm.mjs"
   },
   "dependencies": {
-    "@mediapipe/tasks-vision": "^0.10.21",
+    "@mediapipe/tasks-vision": "0.10.35",
     "canvas-confetti": "^1.9.4",
     "framer-motion": "^12.4.7",
     "react": "^19.0.0",

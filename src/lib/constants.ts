@@ -1,12 +1,21 @@
-/** CDN model URLs for MediaPipe Tasks Vision. */
+/** Model + WASM locations for MediaPipe Tasks Vision. */
+
+/** Face / hand .task models (Google-hosted, versioned independently of the JS SDK). */
 export const FACE_MODEL_URL =
   'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task'
 
 export const HAND_MODEL_URL =
   'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task'
 
-export const WASM_CDN =
-  'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21/wasm'
+/**
+ * Same-origin WASM bundle copied from node_modules/@mediapipe/tasks-vision/wasm
+ * and patched so ModuleFactory is visible on the worker global.
+ * Must match the installed @mediapipe/tasks-vision package version.
+ */
+export const WASM_BASE_URL = '/wasm'
+
+/** @deprecated use WASM_BASE_URL - kept for smoke tests / external docs */
+export const WASM_CDN = WASM_BASE_URL
 
 /** MediaPipe face landmark indices */
 export const NOSE_TIP_INDEX = 1

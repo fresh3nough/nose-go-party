@@ -35,9 +35,11 @@ describe('smoke: critical modules load', () => {
     expect(COUNTDOWN_COLORS[2]).toBe('#FFBE0B')
   })
 
-  it('points MediaPipe models at Google storage CDN', () => {
+  it('points MediaPipe models at Google storage CDN and local wasm', async () => {
+    const { WASM_BASE_URL } = await import('../lib/constants')
     expect(FACE_MODEL_URL).toContain('storage.googleapis.com/mediapipe-models')
     expect(HAND_MODEL_URL).toContain('storage.googleapis.com/mediapipe-models')
+    expect(WASM_BASE_URL).toBe('/wasm')
     expect(NOSE_TIP_INDEX).toBe(1)
     expect(FOREHEAD_INDEX).toBe(10)
     expect(INDEX_TIP_INDEX).toBe(8)

@@ -2,6 +2,10 @@
 /**
  * MediaPipe FaceLandmarker + HandLandmarker running off the main thread.
  * Tries GPU delegate first, falls back to CPU.
+ *
+ * WASM assets are served same-origin from /wasm and patched so ModuleFactory
+ * is assigned on the worker global (required when the loader is pulled in via
+ * dynamic import inside a module worker).
  */
 import {
   FaceLandmarker,
@@ -15,7 +19,7 @@ import {
   INDEX_TIP_INDEX,
   NOSE_TIP_INDEX,
   THUMB_TIP_INDEX,
-  WASM_CDN,
+  WASM_BASE_URL,
   WRIST_INDEX,
 } from '../lib/constants'
 import { associateHandsToFaces, assignPlayers } from '../lib/players'
@@ -37,18 +41,29 @@ function post(msg: WorkerOutMessage) {
   self.postMessage(msg)
 }
 
-function lmToPoint(
-  lm: { x: number; y: number },
-  mirror: boolean,
-): Point2D {
+function lmToPoint(lm: { x: number; y: number }, mirror: boolean): Point2D {
   return {
     x: mirror ? 1 - lm.x : lm.x,
     y: lm.y,
   }
 }
 
+/**
+ * Resolve WASM base URL to an absolute path the worker can fetch.
+ * Relative "/wasm" breaks under some worker base-URI cases.
+ */
+function resolveWasmBase(): string {
+  if (/^https?:\/\//i.test(WASM_BASE_URL)) {
+    return WASM_BASE_URL.replace(/\/$/, '')
+  }
+  const origin = self.location?.origin ?? ''
+  const path = WASM_BASE_URL.startsWith('/') ? WASM_BASE_URL : `/${WASM_BASE_URL}`
+  return `${origin}${path}`.replace(/\/$/, '')
+}
+
 async function createLandmarkers(delegate: 'GPU' | 'CPU') {
-  const vision = await FilesetResolver.forVisionTasks(WASM_CDN)
+  const wasmBase = resolveWasmBase()
+  const vision = await FilesetResolver.forVisionTasks(wasmBase)
   const face = await FaceLandmarker.createFromOptions(vision, {
     baseOptions: {
       modelAssetPath: FACE_MODEL_URL,
@@ -121,7 +136,6 @@ function detect(bitmap: ImageBitmap, timestamp: number, mirror: boolean) {
       const forehead = lms[FOREHEAD_INDEX] ?? lms[NOSE_TIP_INDEX]
       if (!nose) continue
 
-      // Axis-aligned box from all face landmarks
       let xMin = 1
       let yMin = 1
       let xMax = 0
@@ -132,7 +146,6 @@ function detect(bitmap: ImageBitmap, timestamp: number, mirror: boolean) {
         if (p.x > xMax) xMax = p.x
         if (p.y > yMax) yMax = p.y
       }
-      // Mirror box if needed
       const box: BoundingBox = mirror
         ? {
             xMin: 1 - xMax,

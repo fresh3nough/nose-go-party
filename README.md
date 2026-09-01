@@ -1,5 +1,8 @@
 # NOSE GO! Party Edition
 
+**Live game:** [https://nose-go.com/](https://nose-go.com/)
+
+
 Full-screen camera party game: first player to touch their nose after **GO!** wins.
 
 ## Play

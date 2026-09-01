@@ -157,3 +157,10 @@ Show a clear camera permission rationale. Do not record or persist video unless 
 - `install-server.sh` — Ubuntu 22.04 bootstrap
 - `scripts/gcp-setup.sh` — GCP resource provisioning
 - `.github/workflows/deploy.yml` — CI deploy on `main`
+
+## Production URL
+
+- https://nose-go.com/
+- https://www.nose-go.com/
+- Google-managed SSL via HTTPS load balancer IP 34.49.115.26
+- Origin VM: nose-go-vm 34.68.53.223
